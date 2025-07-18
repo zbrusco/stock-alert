@@ -1,81 +1,217 @@
-from datetime import datetime
-from django.db import models, IntegrityError
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from datetime import datetime, timedelta
 from market_data.models import (
     Stock,
+    UnobtainableRange,
     StockPrice5Min,
     StockPrice15Min,
     StockPrice1H,
     StockPrice1D,
     StockPrice1Month,
 )
-import os
-import re
-import yfinance as yf
+from . import api_clients as api
 import pandas_market_calendars as mcal
+import logging
 
-# Loading .env variables
-api_key_alpaca = os.environ.get("api_key_alpaca")
-api_secret_alpaca = os.environ.get("api_secret_alpaca")
-api_key_finage = os.environ.get("api_key_finage")
-api_key_alpha = os.environ.get("api_key_alpha")
-api_key_polygon = os.environ.get("api_key_polygon")
-api_key_tiingo = os.environ.get("api_key_tiingo")
-api_key_bento = os.environ.get("api_key_bento")
+logger = logging.getLogger(__name__)
 
-api_src = ["alpaca", "finage", "alphavantage", "polygon", "tiingo", "databento"]
+
+# Add more timeframes if needed
+TIMEFRAME_CONFIG = {
+    "5min": {
+        "model": StockPrice5Min,
+        "delta": timedelta(minutes=5),
+    },
+    "15min": {
+        "model": StockPrice15Min,
+        "delta": timedelta(minutes=15),
+    },
+    "1h": {
+        "model": StockPrice1H,
+        "delta": timedelta(hours=1),
+    },
+    "1d": {
+        "model": StockPrice1D,
+        "delta": timedelta(days=1),
+    },
+    "1month": {
+        "model": StockPrice1Month,
+        "delta": timedelta(days=30),
+    },
+}
 
 
 def ensure_data(
     symbol: str, timeframe: str, start: datetime, end: datetime, limit: int
-):
+) -> bool:
     """
     Check if the data exists in the DB, if not then fetch it.
     Returns true if succesful else false.
     """
-    PriceModel = get_timeframe_model(timeframe)
+    PriceModel = get_timeframe(timeframe, "model")
 
-    bars_available = is_all_bars_available(symbol, timeframe, start, end, PriceModel)
-    if not bars_available:
-        return fetch_data(symbol, timeframe, start, end, limit, PriceModel)
+    if is_all_bars_available(symbol, timeframe, start, end, PriceModel):
+        logger.debug(f"All data already available for {symbol} {timeframe}")
+        return True
+
+    result = fetch_missing_data(symbol, timeframe, start, end, limit, PriceModel)
+
+    if result:
+        logger.info(f"Successfully ensured data for {symbol} {timeframe}")
+    else:
+        logger.error(f"Failed to ensure data for {symbol} {timeframe}")
+
+    return result
+
+
+def fetch_missing_data(
+    symbol: str, timeframe: str, start: datetime, end: datetime, limit: int, PriceModel
+) -> bool:
+    """
+    Fetch data from an API with multiple fallbacks.
+    Returns true if successful, else false.
+    """
+    stock, _ = Stock.objects.get_or_create(symbol=symbol)
+
+    existing_timestamps = set(
+        PriceModel.objects.filter(
+            stock=stock, timestamp__range=(start, end)
+        ).values_list("timestamp", flat=True)
+    )
+    unobtainable_timestamps = list(
+        UnobtainableRange.objects.filter(
+            stock=stock,
+            timeframe=timeframe,
+            start__lt=end,
+            end__gt=start,
+        ).values_list("start", "end")
+    )
+
+    missing_dates = []
+    expected_timestamps = get_expected_bar_timestamps(symbol, timeframe, start, end)
+    # If the calendar check fails fetch the whole data
+    if not expected_timestamps:
+        return fetch_gap_data(stock, symbol, timeframe, gap_start, gap_end, PriceModel)
+
+    # Ensure all timestamps are available in the response
+    for expected_date in expected_timestamps:
+        if expected_date in existing_timestamps:
+            continue
+
+        # Skip if within unobtainable range
+        is_unobtainable = any(
+            unobt_start <= expected_date <= unobt_end
+            for unobt_start, unobt_end in unobtainable_timestamps
+        )
+        if is_unobtainable:
+            continue
+
+        missing_dates.append(expected_date)
+
+    if not missing_dates:
+        return True
+
+    gap = group_ranges(missing_dates, timeframe)
+
+    for gap_start, gap_end in gap:
+        if not fetch_gap_data(stock, symbol, timeframe, gap_start, gap_end, PriceModel):
+            return False
     return True
 
 
-def fetch_data(
-    symbol: str, timeframe: str, start: datetime, end: datetime, limit: int, PriceModel
-):
+def group_ranges(timestamps, timeframe: str) -> list:
     """
-    Fetch data from an API with multiple fallbacks
+    Groups a sorted list of timestamps into contiguous ranges.
+    Returns list of (start_date, end_date) tuples.
     """
+    if not timestamps:
+        return []
 
-    # yFinance
-    try:
-        df = fetch_from_yfinance(symbol, timeframe, start, end)
-        # Store non empty dataframe
-        if df is not None and not df.empty:
-            save_to_db(df, symbol, PriceModel)
-            return True
-    except Exception as e:
-        print(f"yfinance fetch failed: {e}")
+    expected_delta = get_timeframe(timeframe, "delta")
 
-    # Alpaca
-    try:
-        df = fetch_from_alpaca(symbol, timeframe, start, end, limit)
-        if df is not None and not df.empty:
-            save_to_db(df, symbol, PriceModel)
-            return True
-    except Exception as e:
-        print(f"yfinance fetch failed: {e}")
+    ranges = []
+    current_start = timestamps[0]
+    current_end = timestamps[0]
 
-    # If all sources fail
-    print(f"df = {df}")
+    for i in range(1, len(timestamps)):
+        current_ts = timestamps[i]
+        previous_ts = timestamps[i - 1]
+
+        # Check if current timestamp is contiguous with previous
+        if timeframe.lower() == "1d":
+            # For daily data, use market calendar logic
+            expected_next = previous_ts + expected_delta
+            # Allow for weekends and holidays (more flexible gap detection)
+            is_contiguous = (current_ts - previous_ts).days <= 4
+        else:
+            # For intraday data, strict timing
+            expected_next = previous_ts + expected_delta
+            is_contiguous = abs((current_ts - expected_next).total_seconds()) < 60
+
+        if is_contiguous:
+            # Extend current range
+            current_end = current_ts
+        else:
+            # Gap found, close current range and start new one
+            ranges.append((current_start, current_end))
+            current_start = current_ts
+            current_end = current_ts
+
+    # Add the final range
+    ranges.append((current_start, current_end))
+
+    return ranges
+
+
+def fetch_gap_data(
+    stock,
+    symbol: str,
+    timeframe: str,
+    gap_start: datetime,
+    gap_end: datetime,
+    PriceModel,
+) -> bool:
+    """
+    Attempt to fetch data from multiple API sources.
+    Returns true if successful, false otherwise.
+    """
+    logger.info(f"Fetching {symbol} {timeframe} data from {gap_start} to {gap_end}")
+
+    sources = [
+        api.fetch_from_yfinance,
+        api.fetch_from_alpaca,
+        api.fetch_from_finage,
+        api.fetch_from_tiingo,
+        api.fetch_from_polygon,
+        api.fetch_from_databento,
+    ]
+    for src in sources:
+        try:
+            data = src(symbol, timeframe, gap_start, gap_end)
+            if data is not None and not data.empty:
+                save_to_db(data, stock, PriceModel)
+                logger.info(
+                    f"Successfully fetched {timeframe} {symbol} from {gap_start} to {gap_start} - {src.__name__}"
+                )
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to fetch from {src.__name__}: {e}")
+            continue
+
+    # If all sources failed, mark as unobtainable
+    logger.error(
+        f"All API sources failed for {symbol} {timeframe} {gap_start} to {gap_end}"
+    )
+    UnobtainableRange.objects.create(
+        stock=stock,
+        timeframe=timeframe,
+        start=gap_start,
+        end=gap_end,
+        reason="All data sources failed",
+    )
     return False
 
 
-def save_to_db(df, symbol: str, PriceModel):
-    stock, _ = Stock.objects.get_or_create(symbol=symbol.upper())
+def save_to_db(df, stock, PriceModel):
     # Standardize column names (yFinance)
     df.rename(
         columns={
@@ -89,99 +225,30 @@ def save_to_db(df, symbol: str, PriceModel):
         errors="ignore",
     )
 
-    records = [
-        PriceModel(stock=stock, timestamp=index.to_pydatetime(), **row.to_dict())
-        for index, row in df.iterrows()
-    ]
-    PriceModel.objects.bulk_create(records, ignore_conflicts=True)
+    try:
+        records = [
+            PriceModel(stock=stock, timestamp=index.to_pydatetime(), **row.to_dict())
+            for index, row in df.iterrows()
+        ]
+        PriceModel.objects.bulk_create(records, ignore_conflicts=True)
+    except Exception as e:
+        logger.error(f"Failed to save data for {stock.symbol}: {e}")
+        pass
 
 
-def fetch_from_alpaca(
-    symbol: str, timeframe: str, start: datetime, end: datetime, limit: int
-):
+def get_timeframe(timeframe: str, type: str):
     """
-    Get stock market info from the Alpaca API.
-     ref. https://docs.alpaca.markets/reference/stockbars-1
+    Get the Django model given a timeframe.
     """
-
-    # Convert to timeframe object
-    tf_object = convert_tf(timeframe, "alpaca")
-    if not tf_object:
-        return ValueError("Alpaca: TimeFrame object conversion failed")
-
-    amount, unit = tf_object
-
-    client = StockHistoricalDataClient(api_key_alpaca, api_secret_alpaca)
-    request_params = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(amount=amount, unit=unit),
-        start=start,
-        end=end,
-        limit=limit,
-    )
-    return client.get_stock_bars(request_params)
-
-
-def fetch_from_yfinance(symbol: str, timeframe: str, start: datetime, end: datetime):
-    tf_object = convert_tf(timeframe, "yfinance")
-    if not tf_object:
-        return ValueError("yFinance: TimeFrame object conversion failed")
-
-    amount, unit = tf_object
-    interval = f"{amount}{unit}"
-
-    return yf.download(tickers=symbol, start=start, end=end, interval=interval)
-
-
-# Convert the timeframe the API specification
-def convert_tf(timeframe: str, endpoint: str):
-    if matches := re.search(
-        r"^(\d{1,2})(min|[h]|[d]|week|month)", timeframe, re.IGNORECASE
-    ):
-        amount, unit = matches.groups()
-        amount = int(amount)
-        unit = unit.lower()
-    else:
-        return None
-
-    if endpoint == "alpaca":
-        alpaca_unit = {
-            "min": TimeFrameUnit.Minute,
-            "h": TimeFrameUnit.Hour,
-            "d": TimeFrameUnit.Day,
-            "week": TimeFrameUnit.Week,
-            "month": TimeFrameUnit.Month,
-        }
-        unit_converted = alpaca_unit.get(unit)
-
-    elif endpoint == "yfinance":
-        yf_unit = {
-            "min": "m",
-            "h": "h",
-            "d": "d",
-            "week": "wk",
-            "month": "mo",
-        }
-        unit_converted = yf_unit.get(unit)
-
-    else:
-        return None
-    return amount, unit_converted
-
-
-def get_timeframe_model(timeframe: str):
-    # Add more timeframe models if needed
-    MARKET_DATA_TIMEFRAME_MODEL = {
-        "5min": StockPrice5Min,
-        "15min": StockPrice15Min,
-        "1h": StockPrice1H,
-        "1d": StockPrice1D,
-        "1month": StockPrice1Month,
-    }
-    model = MARKET_DATA_TIMEFRAME_MODEL.get(timeframe.lower())
-    if not model:
+    config = TIMEFRAME_CONFIG.get(timeframe.lower())
+    if not config:
         raise ValueError(f"Invalid timeframe of '{timeframe}'")
-    return model
+    if type == "model":
+        return config["model"]
+    elif type == "delta":
+        return config["delta"]
+    else:
+        raise ValueError(f"Invalid type")
 
 
 def is_all_bars_available(
@@ -192,6 +259,8 @@ def is_all_bars_available(
     the exchange's calendar.
     """
     expected_bars = get_expected_bars(symbol, timeframe, start, end)
+    if expected_bars == -1:
+        return False
 
     actual_bars = PriceModel.objects.filter(
         stock__symbol__iexact=symbol,
@@ -202,38 +271,62 @@ def is_all_bars_available(
     return actual_bars >= expected_bars
 
 
-def get_expected_bars(symbol: str, timeframe: str, start: datetime, end: datetime):
+def get_expected_bars(
+    symbol: str, timeframe: str, start: datetime, end: datetime
+) -> int:
     """
     Gets the expected bars in a specific timeframe given an exchange's calendar.
     """
-    # db_exchange = get_exchange(symbol)
-    # exchange = mcal.get_calendar(convert_exchange(db_exchange))
-    exchange = mcal.get_calendar("NYSE")
+    try:
+        db_exchange = get_exchange_from_db(symbol)
+        if not db_exchange:
+            logger.debug(f"No exchange found in DB for {symbol}, using NYSE")
+            raise KeyError  # Get fallback exchange
+        exchange = mcal.get_calendar(db_exchange)
+    except KeyError:
+        exchange = mcal.get_calendar("NYSE")
+
     schedule = exchange.schedule(start_date=start.date(), end_date=end.date())
 
-    if timeframe == "1D":
-        return len(schedule)
-    elif timeframe == "1Month":
-        # this is more ambiguous—you may want to count unique months in the schedule
-        return schedule.index.to_series().dt.to_period("M").nunique()
+    if schedule.empty:
+        logger.warning(f"Empty schedule for {symbol} from {start} to {end}")
+        return -1  # Skip calendar validation
 
-    minutes_df = mcal.date_range(schedule, frequency="1min")  # gives trading minutes
-
-    if timeframe == "5Min":
-        return len(minutes_df) // 5
-    elif timeframe == "15Min":
-        return len(minutes_df) // 15
-    elif timeframe == "1H":
-        return len(minutes_df) // 60
-
-    raise ValueError(f"Unsupported timeframe: {timeframe}")
+    try:
+        total_bars = len(mcal.date_range(schedule, frequency=timeframe))
+        logger.info(f"Expected {total_bars} bars for {symbol} {timeframe}")
+        return total_bars
+    except (KeyError, ValueError) as e:
+        logger.warning(f"Calendar validation failed for {symbol} {timeframe}: {e}")
+        return -1  # Skip calendar validation
 
 
-def get_exchange():
-    # Get Exchange from metadata DB
-    ...
+def get_exchange_from_db(symbol: str):
+    """
+    Gets the Exchange metadata from the DB.
+    """
+    stock = Stock.objects.filter(symbol__iexact=symbol).only("exchange").first()
+    return stock.exchange if stock else None
 
 
-def convert_exchange():
-    # convert exchange to API's inputs
-    ...
+def get_expected_bar_timestamps(
+    symbol: str, timeframe: str, start: datetime, end: datetime
+):
+    """
+    Returns a list of expected trading timestamps for the given symbol, timeframe, and date range.
+    Uses market calendar to respect trading hours and holidays.
+    """
+    try:
+        db_exchange = get_exchange_from_db(symbol)
+        exchange = mcal.get_calendar(db_exchange)
+    except Exception:
+        exchange = mcal.get_calendar("NYSE")
+
+    # Get market schedule for the date range
+    schedule = exchange.schedule(start_date=start.date(), end_date=end.date())
+
+    try:
+        total_bars = mcal.date_range(schedule, frequency=timeframe)
+        return [bar.to_pydatetime() for bar in total_bars]
+    except KeyError:
+        return []
