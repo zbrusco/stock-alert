@@ -1,4 +1,7 @@
-from data_ingestion.services import ensure_data, get_timeframe_model
+from data_ingestion.ohlcv.services import (
+    ensure_data,
+    get_timeframe,
+)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -6,7 +9,11 @@ from .serializers import StockPriceSerializer
 import datetime
 
 
+# check https://docs.djangoproject.com/en/5.2/ref/validators/
 class PriceDataView(APIView):
+    # Restrict to the API to just queries
+    http_method_names = ["get"]
+
     def get(self, request):
         symbol = request.query_params.get("symbol").upper()
         timeframe = request.query_params.get("timeframe")
@@ -50,7 +57,7 @@ class PriceDataView(APIView):
             )
 
         # Timeframe validation
-        PriceModel = get_timeframe_model(timeframe)
+        PriceModel = get_timeframe(timeframe, "model")
 
         # Check the DB
         is_data_ready = ensure_data(
