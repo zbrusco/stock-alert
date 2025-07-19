@@ -3,9 +3,9 @@ import pandas as pd
 from django.test import TestCase
 from alpaca.data.timeframe import TimeFrameUnit
 from unittest.mock import patch
-from data_ingestion.services import (
+from data_ingestion.ohlcv.services import (
     ensure_data,
-    fetch_data,
+    fetch_missing_data,
     save_to_db,
     convert_tf,
     get_timeframe_model,
@@ -66,7 +66,10 @@ class StockTestCase(TestCase):
 
     def test_get_timeframe_model(self):
         self.assertEqual(get_timeframe_model("5min"), StockPrice5Min)
+        self.assertEqual(get_timeframe_model("15min"), StockPrice15Min)
+        self.assertEqual(get_timeframe_model("1h"), StockPrice1H)
         self.assertEqual(get_timeframe_model("1d"), StockPrice1D)
+        self.assertEqual(get_timeframe_model("1month"), StockPrice1Month)
 
         with self.assertRaises(ValueError):
             get_timeframe_model("foo")
@@ -101,7 +104,7 @@ class StockTestCase(TestCase):
             )
         )
 
-    def test_(self):
+    def test_get_expected_bars(self):
         self.assertEqual(
             get_expected_bars("SPY", "1D", datetime(2025, 1, 1), datetime(2025, 1, 2)),
             1,

@@ -2,15 +2,18 @@ from datetime import datetime, timedelta
 from market_data.models import (
     Stock,
     UnobtainableRange,
+    BasePrice,
     StockPrice5Min,
     StockPrice15Min,
     StockPrice1H,
     StockPrice1D,
     StockPrice1Month,
 )
-from . import api_clients as api
+from data_ingestion.ohlcv import client
+import pandas as pd
 import pandas_market_calendars as mcal
 import logging
+from typing import Type
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +67,12 @@ def ensure_data(
 
 
 def fetch_missing_data(
-    symbol: str, timeframe: str, start: datetime, end: datetime, limit: int, PriceModel
+    symbol: str,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    PriceModel: Type[BasePrice],
 ) -> bool:
     """
     Fetch data from an API with multiple fallbacks.
@@ -118,7 +126,7 @@ def fetch_missing_data(
     return True
 
 
-def group_ranges(timestamps, timeframe: str) -> list:
+def group_ranges(timestamps: list, timeframe: str) -> list:
     """
     Groups a sorted list of timestamps into contiguous ranges.
     Returns list of (start_date, end_date) tuples.
@@ -163,12 +171,12 @@ def group_ranges(timestamps, timeframe: str) -> list:
 
 
 def fetch_gap_data(
-    stock,
+    stock: object,
     symbol: str,
     timeframe: str,
     gap_start: datetime,
     gap_end: datetime,
-    PriceModel,
+    PriceModel: Type[BasePrice],
 ) -> bool:
     """
     Attempt to fetch data from multiple API sources.
@@ -177,12 +185,12 @@ def fetch_gap_data(
     logger.info(f"Fetching {symbol} {timeframe} data from {gap_start} to {gap_end}")
 
     sources = [
-        api.fetch_from_yfinance,
-        api.fetch_from_alpaca,
-        api.fetch_from_finage,
-        api.fetch_from_tiingo,
-        api.fetch_from_polygon,
-        api.fetch_from_databento,
+        client.fetch_from_yfinance,
+        client.fetch_from_alpaca,
+        client.fetch_from_finage,
+        client.fetch_from_tiingo,
+        client.fetch_from_polygon,
+        client.fetch_from_databento,
     ]
     for src in sources:
         try:
@@ -211,7 +219,7 @@ def fetch_gap_data(
     return False
 
 
-def save_to_db(df, stock, PriceModel):
+def save_to_db(df: pd.DataFrame, stock: object, PriceModel: Type[BasePrice]):
     # Standardize column names (yFinance)
     df.rename(
         columns={
@@ -252,8 +260,12 @@ def get_timeframe(timeframe: str, type: str):
 
 
 def is_all_bars_available(
-    symbol: str, timeframe: str, start: datetime, end: datetime, PriceModel
-):
+    symbol: str,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+    PriceModel: Type[BasePrice],
+) -> bool:
     """
     Ensures all data bars are available in the database according to
     the exchange's calendar.

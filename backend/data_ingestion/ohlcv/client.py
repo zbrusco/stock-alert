@@ -4,7 +4,7 @@ import yfinance as yf
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from .credentials import get_api_credentials
+from ..credentials import get_api_credentials
 from datetime import datetime
 
 # Load the API keys
