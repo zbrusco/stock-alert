@@ -36,7 +36,7 @@ urlpatterns = [
         auth_views.LogoutView.as_view(template_name="users/logout.html"),
         name="logout",
     ),
-    path("api/users/", user_views.user_list, name="user-list"),
-    path("api/", include("api.urls")),
+    path("users/", user_views.user_list, name="user-list"),
+    path("data/", include("api.urls")),
     path("", include("strategies.urls")),
 ]
