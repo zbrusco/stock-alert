@@ -31,8 +31,8 @@ class PriceDataView(APIView):
 
         # Date validation
         try:
-            end_date = datetime.datetime.fromisoformat(end)
-            start_date = datetime.datetime.fromisoformat(start)
+            end_date = datetime.datetime.fromisoformat(end).date()
+            start_date = datetime.datetime.fromisoformat(start).date()
             if start_date > end_date:
                 return Response(
                     {"error": "Start date must be before end date."},
@@ -41,7 +41,10 @@ class PriceDataView(APIView):
             if end_date > datetime.date.today():
                 end_date = datetime.date.today()
         except ValueError:
-            return Response({"error": "Invalid date format. (YYYY-MM-DD only)"})
+            return Response(
+                {"error": "Invalid date format. (YYYY-MM-DD only)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Limit validation
         try:
