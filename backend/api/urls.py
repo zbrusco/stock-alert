@@ -2,5 +2,5 @@ from django.urls import path
 from .views import PriceDataView as data
 
 urlpatterns = [
-    path("", data.as_view(), name="stock-price-data"),
+    path("get-ticker/<str:symbol>/", data.as_view(), name="get_ticker"),
 ]

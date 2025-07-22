@@ -14,8 +14,8 @@ class PriceDataView(APIView):
     # Restrict to the API to just queries
     http_method_names = ["get"]
 
-    def get(self, request):
-        symbol = request.query_params.get("symbol").upper()
+    def get(self, request, symbol):
+        symbol = symbol.upper()
         timeframe = request.query_params.get("timeframe")
         start = request.query_params.get("start")
         end = request.query_params.get("end")
