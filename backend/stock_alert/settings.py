@@ -42,6 +42,7 @@ if not DEBUG:
 
 INSTALLED_APPS = [
     "alerts.apps.AlertsConfig",
+    "data_ingestion.apps.DataIngestionConfig",
     "market_data.apps.MarketdataConfig",
     "strategies.apps.StrategiesConfig",
     "users.apps.UsersConfig",
