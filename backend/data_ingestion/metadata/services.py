@@ -12,6 +12,7 @@ UPDATE_FREQUENCY_DAYS = 30
 def is_metadata_updated(symbol: str) -> bool:
     """
     Check if metadata is missing or outdated.
+
     Returns true if metadata was updated within the specified days, false otherwise.
     """
     try:
@@ -29,12 +30,7 @@ def ensure_metadata(symbol: str, force_update: bool = False) -> bool:
     """
     Ensure metadata exists for a symbol.
 
-    Args:
-        symbol: Stock symbol
-        force_update: Force update even if cache is fresh
-
-    Returns:
-        True if metadata is available, False if fetch failed
+    Returns true if it exists, else call a function to fetch it.
     """
     if not force_update and is_metadata_updated(symbol):
         logger.debug(f"Metadata for {symbol} is updated, skipping update")
@@ -43,7 +39,12 @@ def ensure_metadata(symbol: str, force_update: bool = False) -> bool:
     return fetch_metadata(symbol)
 
 
-def fetch_metadata(symbol: str):
+def fetch_metadata(symbol: str) -> bool:
+    """
+    Fetch metadata from API provides given a stock symbol.
+
+    Returns true if fetch was successful, else false.
+    """
 
     logger.info(f"Fetching {symbol} metadata")
     stock, _ = Stock.objects.get_or_create(symbol=symbol)
@@ -70,9 +71,19 @@ def fetch_metadata(symbol: str):
 
 
 def save_metadata(metadata: dict, stock: object) -> bool:
+    """
+    Save stock symbol metadata.
+
+    Returns true if successful, else false.
+    """
     exchange = metadata.get("exchange")
+    updated = None
+
     if exchange and stock.exchange != exchange:
         stock.exchange = exchange
+        updated = True
+
+    if updated:
         stock.save()
 
     try:
@@ -83,6 +94,7 @@ def save_metadata(metadata: dict, stock: object) -> bool:
             market_cap=metadata["market_cap"],
             last_updated=timezone.now(),
         )
+        logger.debug(f"Successfully saved metadata for {stock.symbol}")
         return True
     except Exception as e:
         logger.exception(f"Failed to save metadata for {stock.symbol}")

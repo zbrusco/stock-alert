@@ -88,7 +88,9 @@ def fetch_from_yfinance(
     amount, unit = tf_object
     interval = f"{amount}{unit}"
 
-    return yf.download(tickers=symbol, start=start, end=end, interval=interval)
+    return yf.download(
+        tickers=symbol, start=start, end=end, interval=interval, multi_level_index=False
+    )
 
 
 def fetch_from_finage(

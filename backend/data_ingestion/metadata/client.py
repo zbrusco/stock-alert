@@ -1,6 +1,7 @@
 import yfinance as yf
-from ..credentials import get_api_credentials
 import requests
+from ..credentials import get_api_credentials
+from .utils import get_fmp_asset, yf_to_mcal_exchange
 
 # Load the API keys
 _credentials = get_api_credentials()
@@ -18,15 +19,7 @@ def fetch_from_fmp(symbol: str) -> dict:
         return None
 
     prof = data[0]
-
-    types = {
-        "isEtf": "ETF",
-        "isAdr": "ADR",
-        "isFund": "FUND",
-    }
-    asset_type = next(
-        (value for key, value in types.items() if prof.get(key)), "EQUITY"
-    )
+    asset_type = get_fmp_asset(prof)
 
     result = {
         "symbol": prof.get("symbol"),
@@ -46,9 +39,10 @@ def fetch_from_yfinance(symbol: str) -> dict:
     ticker = yf.Ticker(symbol)
     info = ticker.info or {}
 
+    exchange = yf_to_mcal_exchange(info.get("exchange"))
     result = {
         "symbol": symbol,
-        "exchange": info.get("exchange"),
+        "exchange": exchange,
         "asset_type": info.get("quoteType"),
         "sector": info.get("sector"),
         "market_cap": info.get("marketCap"),

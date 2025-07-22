@@ -10,6 +10,7 @@ from market_data.models import (
     StockPrice1Month,
 )
 from data_ingestion.ohlcv import client
+from data_ingestion.metadata.services import ensure_metadata
 import pandas as pd
 import pandas_market_calendars as mcal
 import logging
@@ -48,15 +49,20 @@ def ensure_data(
 ) -> bool:
     """
     Check if the data exists in the DB, if not then fetch it.
+
     Returns true if succesful else false.
     """
+    # Get the DB model
     PriceModel = get_timeframe(timeframe, "model")
+
+    # Check metadata
+    ensure_metadata(symbol)
 
     if is_all_bars_available(symbol, timeframe, start, end, PriceModel):
         logger.debug(f"All data already available for {symbol} {timeframe}")
         return True
 
-    result = fetch_missing_data(symbol, timeframe, start, end, limit, PriceModel)
+    result = fetch_missing_data(symbol, timeframe, start, end, PriceModel)
 
     if result:
         logger.info(f"Successfully ensured data for {symbol} {timeframe}")
@@ -71,11 +77,11 @@ def fetch_missing_data(
     timeframe: str,
     start: datetime,
     end: datetime,
-    limit: int,
     PriceModel: Type[BasePrice],
 ) -> bool:
     """
     Fetch data from an API with multiple fallbacks.
+
     Returns true if successful, else false.
     """
     stock, _ = Stock.objects.get_or_create(symbol=symbol)
@@ -129,6 +135,7 @@ def fetch_missing_data(
 def group_ranges(timestamps: list, timeframe: str) -> list:
     """
     Groups a sorted list of timestamps into contiguous ranges.
+
     Returns list of (start_date, end_date) tuples.
     """
     if not timestamps:
@@ -180,6 +187,7 @@ def fetch_gap_data(
 ) -> bool:
     """
     Attempt to fetch data from multiple API sources.
+
     Returns true if successful, false otherwise.
     """
     logger.info(f"Fetching {symbol} {timeframe} data from {gap_start} to {gap_end}")
@@ -232,16 +240,17 @@ def save_to_db(df: pd.DataFrame, stock: object, PriceModel: Type[BasePrice]):
         inplace=True,
         errors="ignore",
     )
-
     try:
         records = [
             PriceModel(stock=stock, timestamp=index.to_pydatetime(), **row.to_dict())
             for index, row in df.iterrows()
         ]
         PriceModel.objects.bulk_create(records, ignore_conflicts=True)
+        logger.info(f"Successfully stored {stock.symbol}")
+        return True
     except Exception as e:
         logger.error(f"Failed to save data for {stock.symbol}: {e}")
-        pass
+        return False
 
 
 def get_timeframe(timeframe: str, type: str):
@@ -298,7 +307,7 @@ def get_expected_bars(
     except KeyError:
         exchange = mcal.get_calendar("NYSE")
 
-    schedule = exchange.schedule(start_date=start.date(), end_date=end.date())
+    schedule = exchange.schedule(start_date=start, end_date=end)
 
     if schedule.empty:
         logger.warning(f"Empty schedule for {symbol} from {start} to {end}")
@@ -323,7 +332,7 @@ def get_exchange_from_db(symbol: str):
 
 def get_expected_bar_timestamps(
     symbol: str, timeframe: str, start: datetime, end: datetime
-):
+) -> list:
     """
     Returns a list of expected trading timestamps for the given symbol, timeframe, and date range.
     Uses market calendar to respect trading hours and holidays.
@@ -335,7 +344,7 @@ def get_expected_bar_timestamps(
         exchange = mcal.get_calendar("NYSE")
 
     # Get market schedule for the date range
-    schedule = exchange.schedule(start_date=start.date(), end_date=end.date())
+    schedule = exchange.schedule(start_date=start, end_date=end)
 
     try:
         total_bars = mcal.date_range(schedule, frequency=timeframe)
