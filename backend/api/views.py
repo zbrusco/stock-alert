@@ -79,7 +79,7 @@ class PriceDataView(APIView):
             stock__symbol__iexact=symbol,
             timestamp__gte=start_date,
             timestamp__lte=end_date,
-        ).order_by("-timestamp")[:limit_query]
+        ).order_by("timestamp")[:limit_query]
 
         serializer = StockPriceSerializer(query, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
